@@ -1,5 +1,6 @@
 from pprint import pprint
 
+import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
@@ -69,3 +70,7 @@ async def create_item(user_text: UserText):
     return {
         "metrics": output,
     }
+
+
+if __name__ == "__main__":
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
