@@ -1,23 +1,14 @@
-import calendar
 import dataclasses
-from datetime import datetime
-from typing import Dict, List, Set
+from pprint import pprint
+from string import punctuation
+from typing import Dict, List
 
 import pandas
-from pydantic import BaseModel
+from fastapi import HTTPException
 
 from config import ERROR_REASONS
 from services import STARTUP_OBJECTS
-
-MONTH_VARIANTS = [None, "None", "NA", "N/A"]
-
-
-class CountryMetric(BaseModel):
-    metric_year: int
-    metric_name: str
-    metric_month: str
-    metric_value: str
-    metric_source: str
+from services.pandas_query import PandasQuery, CountryMetric, Validity
 
 
 @dataclasses.dataclass
@@ -27,154 +18,130 @@ class ExtractionError:
 
 
 @dataclasses.dataclass
-class CountryResultManager:
-    openai_extract: CountryMetric = None
-    kwerty_validation: Dict = None
-    is_valid: bool = None
-    error: ExtractionError = None
+class Position:
+    offset: int
+    length: int
 
 
 @dataclasses.dataclass
-class QueryValidity:
-    base_query_is_valid: bool = False
-    metric_value_is_valid: bool = False
+class Match:
+    position: Position
+    message: str
+    openai_extract: CountryMetric = None
+    kwerty_validation: Dict = None
+    validity: Validity = None
 
 
-class PandasQuery:
-    def __init__(
-        self,
-        country_name: str,
-        metric: CountryMetric,
-        validation_data: pandas.DataFrame,
-        columns: Set[str],
-    ):
-        self.country_name = country_name
-        self.metric = metric
-        self.validation_data = validation_data
-        self.columns = columns
-        self.queries = {}
-        self.query_validity = QueryValidity()
+@dataclasses.dataclass
+class MetricMatch:
+    matches: List[Match] = None
 
-    def build_query_string(self, month_year: str):
-        query_string = f"""Country=='{self.country_name}' and Indicator=='{self.metric.metric_name}'"""
-        self.queries["validation_query"] = {"base_query_string": query_string}
-        return
+    def __post_init__(self):
+        if not self.matches:
+            self.matches = []
 
-    @staticmethod
-    def build_month_year_format(month, year):
-        if month in MONTH_VARIANTS or not year or len(month) < 3:
-            today = datetime.now()
-            return f"{calendar.month_abbr[3]}_{str(today.year)[2:]}"
-        return f"{str(month)[:3]}_{str(year)[2:]}"
 
-    def run_query(self):
-        month_year = self.build_month_year_format(
-            self.metric.metric_month, self.metric.metric_year
-        )
-        self.build_query_string(month_year)
-        base_query = self.queries["validation_query"]["base_query_string"]
-        base_query_result = self.validation_data.query(base_query)
-        if len(base_query_result) == 1:
-            self.query_validity.base_query_is_valid = True
-            query_result_dict = base_query_result.to_dict(orient="records")[0]
-            if query_result_dict[month_year] == self.metric.metric_value:
-                self.query_validity.metric_value_is_valid = True
-            self.queries["validation_query"]["query_result"] = query_result_dict
+@dataclasses.dataclass
+class CountryResultManager:
+    metric_match: MetricMatch = None
+    error: ExtractionError = None
 
-        return
-
-    def get_validated_country_data(self):
-        country_information = self.queries["validation_query"]["query_result"]
-        country_data = {
-            "country": country_information["Country"],
-            "indicator": country_information["Indicator"],
-            "source": country_information["Source"],
-            "link": country_information["Link"],
-            "currency_code": country_information["CurrencyCode"],
-            "unit": country_information["Unit"],
-            "category": country_information["Category"],
-            "frequency": country_information["Frequency"],
-            "note": country_information["Note"],
-            "tag": country_information["Tag"],
-            "country_code": country_information["CountryCode"],
-            "indicator_definition": country_information["IndicatorDefinition"],
-            "value": None,
-        }
-        month_year = self.build_month_year_format(
-            self.metric.metric_month, self.metric.metric_year
-        )
-        country_data["value"] = country_information[month_year]
-        return self.serialize_result(country_data)
-
-    @staticmethod
-    def serialize_result(country_data):
-        for key, value in country_data.items():
-            try:
-                if pandas.isna(value):
-                    country_data[key] = None
-            except ValueError:
-                if value.empty:
-                    country_data[key] = None
-        return country_data
+    def __post_init__(self):
+        if not self.error:
+            self.metric_match = MetricMatch()
 
 
 class MetricsManager:
-    def __init__(self, country_data: List[Dict]):
+    def __init__(self, user_text: str, country_data: List[Dict]):
+        self.user_text = user_text
         self.country_data = country_data
         self.validation_data: pandas.DataFrame = STARTUP_OBJECTS["validation_data"]
         self.columns = self.get_columns()
-        self.result = []
+        self.result = CountryResultManager()
 
     def process_metrics(self):
         country_names = self.get_supported_countries()
         for country_information in self.country_data:
-            extracted_information = []
-            country_name = country_information["country"]
-            if country_name not in country_names:
-                extracted_information.append(
-                    CountryResultManager(
-                        error=ExtractionError(
-                            error=True,
-                            error_reason=ERROR_REASONS["CountryNotSupported"],
-                        )
+            country_name = country_information.get("country", self.guess_country_name(country_names))
+            if not country_name:
+                if not country_name:
+                    raise HTTPException(
+                        status_code=502,
+                        detail={
+                            "message": "Could not extract country name.",
+                            "data": self.country_data,
+                        },
                     )
+            if country_name not in country_names:
+                self.result.error = ExtractionError(
+                    error=True, error_reason=ERROR_REASONS["CountryNotSupported"]
                 )
             else:
                 metrics = country_information["country_metrics"]
                 if not metrics:
-                    extracted_information.append(
-                        CountryResultManager(
-                            error=ExtractionError(
-                                error=True, error_reason=ERROR_REASONS["NoMetricsFound"]
-                            )
-                        )
+                    self.result.error = ExtractionError(
+                        error=True, error_reason=ERROR_REASONS["NoMetricsFound"]
                     )
                 else:
                     metrics = [CountryMetric(**metric) for metric in metrics]
-                    for metric in metrics:
-                        pandas_query_handler = PandasQuery(
-                            country_name=country_name,
-                            metric=metric,
-                            validation_data=self.validation_data,
-                            columns=self.columns,
-                        )
-                        pandas_query_handler.run_query()
-                        extracted_information.append(
-                            CountryResultManager(
-                                openai_extract=metric,
-                                kwerty_validation=pandas_query_handler.get_validated_country_data(),
-                                is_valid=pandas_query_handler.query_validity.metric_value_is_valid,
+                    metric_values = [metric.metric_value for metric in metrics]
+                    try:
+                        for metric, offset in zip(
+                                metrics,
+                                self.get_word_positions(self.user_text, metric_values),
+                                # strict=True
+                        ):
+                            pandas_query_handler = PandasQuery(
+                                country_name=country_name,
+                                metric=metric,
+                                validation_data=self.validation_data,
+                                columns=self.columns,
                             )
-                        )
 
-            self.result.append(
-                {"country": country_name, "result": extracted_information}
-            )
+                            validated_data = pandas_query_handler.run_query()
+                            print(validated_data)
+                            match = Match(
+                                position=Position(
+                                    length=len(metric.metric_value), offset=offset
+                                ),
+                                openai_extract=metric,
+                                kwerty_validation=validated_data,
+                                validity=pandas_query_handler.validity,
+                                message=pandas_query_handler.message,
+                            )
+                            self.result.metric_match.matches.append(match)
+                    except ValueError:
+                        raise HTTPException(
+                            status_code=502,
+                            detail={
+                                "message": "Metric match. The metric count in the sentence does not match the count "
+                                           "returned by OpenAI",
+                                "error_type": "METRIC_MISMATCH",
+                                "data": self.country_data,
+                            },
+                        )
 
         return self.result
 
     def get_supported_countries(self):
-        return self.validation_data["Country"].to_list()
+        return set(self.validation_data["country"].to_list())
 
     def get_columns(self):
         return set(self.validation_data.columns.to_list())
+
+    @staticmethod
+    def get_word_positions(text, metric_values):
+        positions = []
+        for index, word in enumerate(text.split()):
+            if word.rstrip(punctuation) in metric_values:
+                positions.append(index)
+
+        return positions
+
+    def guess_country_name(self, country_names):
+        valid_countries = set(
+            country for country in country_names if country in [word.rstrip(punctuation) for word in self.user_text.split(" ")]
+        )
+        if valid_countries:
+            return list(valid_countries)[0]
+

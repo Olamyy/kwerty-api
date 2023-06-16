@@ -1,11 +1,9 @@
 import json
+from pprint import pprint
 
 import openai
-from gptcache import Cache, cache
-from gptcache.manager import manager_factory
-from gptcache.processor.pre import get_prompt
+from fastapi import HTTPException
 from langchain.chat_models import ChatOpenAI
-from gptcache.adapter.langchain_models import LangChainChat
 
 from config import (
     BASE_INSTRUCTION,
@@ -27,29 +25,38 @@ class KorPromptManager:
     def get_msg(data, **_):
         return data.get("messages")[-1].content
 
-    def run(self):
-        llm = ChatOpenAI(
-            model="gpt-3.5-turbo",
-            temperature=MODEL_TEMPERATURE,
-            max_tokens=MAX_TOKENS,
-            top_p=MODEL_TOP_P,
-            n=MODEL_N,
-            frequency_penalty=0,
-            presence_penalty=0,
-        )
-        cache.init(
-            pre_embedding_func=self.get_msg,
-        )
-        extracted_schema = get_schema(LangChainChat(chat=llm), self.user_text)
+    def run(self, previous=None):
+        max_tokens = MAX_TOKENS
+        include_example = None
+        if previous:
+            include_example = (
+                previous['text'],
+                previous['metrics']
+            )
+            max_tokens -= 500
+        try:
+            llm = ChatOpenAI(
+                model="gpt-3.5-turbo",
+                temperature=MODEL_TEMPERATURE,
+                max_tokens=max_tokens,
+                top_p=MODEL_TOP_P,
+                n=MODEL_N,
+                frequency_penalty=0.2,
+                presence_penalty=0.8,
+            )
+            pprint(include_example)
+            extracted_schema = get_schema(llm, self.user_text, include_example=include_example)
+            return extracted_schema
 
-        return extracted_schema
-
-    @staticmethod
-    def init_gptcache(cache_obj: Cache, llm: str):
-        cache_obj.init(
-            pre_embedding_func=get_prompt,
-            data_manager=manager_factory(manager="map", data_dir=f"map_cache_{llm}"),
-        )
+        except Exception as error:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": "Something went wrong while extracting the data",
+                    "error": True,
+                    "details": str(error)
+                },
+            )
 
 
 class PromptManager:

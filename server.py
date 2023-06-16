@@ -7,27 +7,34 @@ import pandas
 import uvicorn
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
-
+from tinydb import TinyDB
 from config import KwertyAPIConfig
 from routes import router
 from services import STARTUP_OBJECTS
 
-logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 
 config = KwertyAPIConfig()
 
 
 def load_validation_data():
-    return pandas.read_csv("cleaned_data.csv")
+    return pandas.read_csv("kwerty_data.csv", encoding='utf-8', engine='python')
+
+
+def load_tiny():
+    db = TinyDB('db.json')
+    return db
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     STARTUP_OBJECTS["validation_data"] = load_validation_data()
+    STARTUP_OBJECTS["db"] = load_tiny()
 
     yield
     STARTUP_OBJECTS.clear()
+
 
 
 def load_app():
