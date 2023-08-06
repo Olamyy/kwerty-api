@@ -8,4 +8,6 @@ uvicorn~=0.21.1
 langchain==0.0.162
 kor~=0.10.0
 tinydb~=4.7.1
-nltk
+nltk~=3.8.1
+aws-cdk-lib
+constructs~=10.2.69

@@ -12,7 +12,7 @@ from config import KwertyAPIConfig
 from routes import router
 from services import STARTUP_OBJECTS
 
-logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 
 config = KwertyAPIConfig()
@@ -36,7 +36,6 @@ async def lifespan(app: FastAPI):
     STARTUP_OBJECTS.clear()
 
 
-
 def load_app():
     app = FastAPI(
         title=config.app_name,
@@ -49,7 +48,6 @@ def load_app():
         CORSMiddleware,
         allow_origins=origins,
         allow_credentials=True,
-        allow_methods=["*"],
         allow_headers=["*"],
     )
     app.include_router(router, prefix="/kwerty")
